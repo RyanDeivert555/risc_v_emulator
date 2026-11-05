@@ -6,10 +6,6 @@ use crate::{
     },
     register_file::RegisterFile,
 };
-use std::{
-    io::{Read, Write},
-    os::fd::FromRawFd,
-};
 
 pub struct Cpu {
     instruction_memory: InstructionMemory,
@@ -84,6 +80,7 @@ impl Cpu {
             let ptr = instructions.as_ptr().cast();
             let len = std::mem::size_of_val(instructions);
 
+            // SAFETY: pointer is properly aligned with a correct length
             unsafe { std::slice::from_raw_parts(ptr, len) }
         };
 
@@ -109,20 +106,20 @@ impl Cpu {
     fn syscall(&mut self) -> Result<ExecutionResult, CpuStepError> {
         let sys = self.register_file.read(RegisterFile::A7);
 
+        // https://jborza.com/post/2021-05-11-riscv-linux-syscalls
         match sys {
             56 => {
                 let dir_fd = self.register_file.read(RegisterFile::A0) as libc::c_int;
                 let filename = {
                     let addr = self.register_file.read(RegisterFile::A1);
-                    let slice = self.data_memory.slice_null_terminated(addr)?;
+                    let slice = self.data_memory.bytes_null_terminated(addr)?;
 
                     // SAFETY: slice is null at the end
                     unsafe { std::ffi::CStr::from_bytes_with_nul_unchecked(slice) }
                 };
-                let flags = self.register_file.read(RegisterFile::A3) as libc::c_int;
-                let mode = self.register_file.read(RegisterFile::A4) as libc::c_int;
+                let flags = self.register_file.read(RegisterFile::A2) as libc::c_int;
+                let mode = self.register_file.read(RegisterFile::A3) as libc::c_int;
 
-                // SAFETY: Upheld by caller
                 let fd = unsafe { libc::openat(dir_fd, filename.as_ptr(), flags, mode) };
                 self.register_file.write(RegisterFile::A0, fd as _);
 
@@ -130,63 +127,61 @@ impl Cpu {
             }
             57 => {
                 let fd = self.register_file.read(RegisterFile::A0) as libc::c_int;
-                // SAFETY: Upheld by caller
+
                 let result = unsafe { libc::close(fd) };
                 self.register_file.write(RegisterFile::A0, result as _);
 
                 Ok(ExecutionResult::Continue)
             }
-            63 => {
-                use std::fs::File;
+            59 => {
+                let pipes = {
+                    let addr = self.register_file.read(RegisterFile::A0);
+                    let raw = self.data_memory.raw_storage_mut::<[libc::c_int; 2]>(addr)?;
 
-                let mut file = {
-                    let fd = self.register_file.read(RegisterFile::A0) as i32;
-                    let file = unsafe { File::from_raw_fd(fd) };
-
-                    // We do not want the file to close on drop
-                    std::mem::ManuallyDrop::new(file)
+                    raw.as_mut_ptr().cast()
                 };
+                let flags = self.register_file.read(RegisterFile::A1) as libc::c_int;
+
+                let result = unsafe { libc::pipe2(pipes, flags) };
+                self.register_file.write(RegisterFile::A0, result as _);
+
+                Ok(ExecutionResult::Continue)
+            }
+            62 => {
+                let fd = self.register_file.read(RegisterFile::A0) as libc::c_int;
+                let offset = self.register_file.read(RegisterFile::A1) as libc::off_t;
+                let whence = self.register_file.read(RegisterFile::A2) as libc::c_int;
+
+                let result = unsafe { libc::lseek(fd, offset, whence) };
+                self.register_file.write(RegisterFile::A0, result as _);
+
+                Ok(ExecutionResult::Continue)
+            }
+            63 => {
+                let fd = self.register_file.read(RegisterFile::A0) as libc::c_int;
                 let buffer = {
                     let addr = self.register_file.read(RegisterFile::A1);
                     let count = self.register_file.read(RegisterFile::A2) as usize;
 
-                    self.data_memory.slice_mut(addr, count)?
+                    self.data_memory.bytes_mut(addr, count)?
                 };
 
-                let result = match file.read(buffer) {
-                    Ok(count) => count as i64,
-                    Err(_) => 0,
-                };
-
-                self.register_file
-                    .write(RegisterFile::A0, result.cast_unsigned());
+                let result = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
+                self.register_file.write(RegisterFile::A0, result as _);
 
                 Ok(ExecutionResult::Continue)
             }
             64 => {
-                use std::fs::File;
-
-                let mut file = {
-                    let fd = self.register_file.read(RegisterFile::A0) as i32;
-                    let file = unsafe { File::from_raw_fd(fd) };
-
-                    // We do not want the file to close on drop
-                    std::mem::ManuallyDrop::new(file)
-                };
+                let fd = self.register_file.read(RegisterFile::A0) as libc::c_int;
                 let buffer = {
                     let addr = self.register_file.read(RegisterFile::A1);
                     let count = self.register_file.read(RegisterFile::A2) as usize;
 
-                    self.data_memory.slice(addr, count)?
+                    self.data_memory.bytes(addr, count)?
                 };
 
-                let result = match file.write(buffer) {
-                    Ok(count) => count as i64,
-                    Err(_) => 0,
-                };
-
-                self.register_file
-                    .write(RegisterFile::A0, result.cast_unsigned());
+                let result = unsafe { libc::write(fd, buffer.as_ptr().cast(), buffer.len()) };
+                self.register_file.write(RegisterFile::A0, result as _);
 
                 Ok(ExecutionResult::Continue)
             }
@@ -194,6 +189,101 @@ impl Cpu {
                 let status_code = self.register_file.read(RegisterFile::A0) as i32;
 
                 Ok(ExecutionResult::Exit(status_code))
+            }
+            172 => {
+                let result = unsafe { libc::getpid() };
+                self.register_file.write(RegisterFile::A0, result as _);
+
+                Ok(ExecutionResult::Continue)
+            }
+            198 => {
+                let domain = self.register_file.read(RegisterFile::A0) as libc::c_int;
+                let ty = self.register_file.read(RegisterFile::A1) as libc::c_int;
+                let protocol = self.register_file.read(RegisterFile::A2) as libc::c_int;
+
+                let result = unsafe { libc::socket(domain, ty, protocol) };
+                self.register_file.write(RegisterFile::A0, result as _);
+
+                Ok(ExecutionResult::Continue)
+            }
+            200 => {
+                let sockfd = self.register_file.read(RegisterFile::A0) as libc::c_int;
+                let sockaddr = {
+                    let addr = self.register_file.read(RegisterFile::A0);
+                    let raw = self.data_memory.raw_storage::<libc::sockaddr>(addr)?;
+
+                    raw.as_ptr().cast()
+                };
+                let addrlen = self.register_file.read(RegisterFile::A1) as libc::socklen_t;
+
+                let result = unsafe { libc::bind(sockfd, sockaddr, addrlen) };
+                self.register_file.write(RegisterFile::A0, result as _);
+
+                Ok(ExecutionResult::Continue)
+            }
+            201 => {
+                let sockfd = self.register_file.read(RegisterFile::A0) as libc::c_int;
+                let backlog = self.register_file.read(RegisterFile::A1) as libc::c_int;
+
+                let result = unsafe { libc::listen(sockfd, backlog) };
+                self.register_file.write(RegisterFile::A0, result as _);
+
+                Ok(ExecutionResult::Continue)
+            }
+            202 => {
+                let sockfd = self.register_file.read(RegisterFile::A0) as libc::c_int;
+                let addr_ptr = self.register_file.read(RegisterFile::A1);
+                let len_ptr = self.register_file.read(RegisterFile::A2);
+
+                let result = if addr_ptr == 0 {
+                    unsafe { libc::accept(sockfd, std::ptr::null_mut(), std::ptr::null_mut()) }
+                } else {
+                    let len_bytes = self
+                        .data_memory
+                        .bytes(len_ptr, std::mem::size_of::<libc::socklen_t>())?;
+                    let mut len = libc::socklen_t::from_le_bytes(len_bytes.try_into().unwrap());
+
+                    let mut addr: libc::sockaddr = unsafe { std::mem::zeroed() };
+
+                    let result = unsafe { libc::accept(sockfd, &mut addr, &mut len) };
+
+                    if result >= 0 {
+                        let bytes = {
+                            let ptr = &raw const addr;
+                            let ptr = ptr.cast();
+
+                            unsafe { std::slice::from_raw_parts(ptr, len as _) }
+                        };
+
+                        self.data_memory
+                            .bytes_mut(addr_ptr, len as _)?
+                            .copy_from_slice(bytes);
+                        self.data_memory
+                            .bytes_mut(len_ptr, std::mem::size_of::<libc::socklen_t>())?
+                            .copy_from_slice(&len.to_le_bytes());
+                    }
+
+                    result
+                };
+
+                self.register_file.write(RegisterFile::A0, result as _);
+
+                Ok(ExecutionResult::Continue)
+            }
+            203 => {
+                let sockfd = self.register_file.read(RegisterFile::A0) as libc::c_int;
+                let sockaddr = {
+                    let addr = self.register_file.read(RegisterFile::A1);
+                    let raw = self.data_memory.raw_storage::<libc::sockaddr>(addr)?;
+
+                    raw.as_ptr().cast()
+                };
+                let addrlen = self.register_file.read(RegisterFile::A2) as libc::socklen_t;
+
+                let result = unsafe { libc::connect(sockfd, sockaddr, addrlen) };
+                self.register_file.write(RegisterFile::A0, result as _);
+
+                Ok(ExecutionResult::Continue)
             }
             sys => Err(CpuStepError::UnsupportedSyscall(sys)),
         }
@@ -440,6 +530,8 @@ mod test {
 
     #[test]
     fn syscall() {
+        use std::io::Write;
+
         let program = [
             0x05d00893, // addi a7, x0, 93
             0x00900513, // addi a0, x0, 9
@@ -456,9 +548,10 @@ mod test {
             0x00500613, // addi a2, x0, 5
             0x00000073, // ecall
         ];
+        let s = b"hello";
 
         let (reader, mut writer) = std::io::pipe().unwrap();
-        writer.write_all(b"hello").unwrap();
+        writer.write_all(s).unwrap();
 
         let mut cpu = Cpu::new(&program, 1 << 12).unwrap();
         // addi a0, x0, <fd>
@@ -467,9 +560,9 @@ mod test {
         cpu.run_test(program.len()).unwrap();
 
         let read_count = cpu.register_file.read(RegisterFile::A0);
-        assert_eq!(read_count, 5);
+        assert_eq!(read_count, s.len() as _);
 
-        let mem = cpu.data_memory.slice(0, 5).unwrap();
+        let mem = cpu.data_memory.bytes(0, s.len()).unwrap();
         assert_eq!(mem, b"hello");
     }
 }

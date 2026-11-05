@@ -1,10 +1,5 @@
 use std::ops::Range;
 
-#[derive(Debug)]
-pub struct DataMemory {
-    ram: Box<[u8]>,
-}
-
 #[repr(usize)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum DataSize {
@@ -26,11 +21,15 @@ pub enum AddrError {
     OutOfRange,
 }
 
-fn range(addr: u64, count: usize, data_size: DataSize) -> Result<Range<usize>, AddrError> {
-    let data_size = data_size as usize;
+fn range(
+    addr: u64,
+    count: usize,
+    data_size: usize,
+    data_align: usize,
+) -> Result<Range<usize>, AddrError> {
     let start = usize::try_from(addr).map_err(|_| AddrError::OutOfRange)?;
 
-    if !start.is_multiple_of(data_size) {
+    if !start.is_multiple_of(data_align) {
         return Err(AddrError::Misaligned);
     }
 
@@ -40,31 +39,50 @@ fn range(addr: u64, count: usize, data_size: DataSize) -> Result<Range<usize>, A
     Ok(start..end)
 }
 
+#[derive(Debug)]
+pub struct DataMemory {
+    // We need the memory to have a higher alignment
+    ram: Box<[u64]>,
+}
+
 impl DataMemory {
     pub fn new(ram_size: u64) -> Self {
+        let count = (ram_size as usize).div_ceil(std::mem::size_of::<u64>());
+
         Self {
-            ram: vec![0; ram_size as usize].into(),
+            ram: vec![0; count].into_boxed_slice(),
         }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        let ptr = self.ram.as_ptr().cast();
+        let len = self.ram.len() * std::mem::size_of::<u64>();
+
+        unsafe { std::slice::from_raw_parts(ptr, len) }
+    }
+
+    fn as_bytes_mut(&mut self) -> &mut [u8] {
+        let ptr = self.ram.as_mut_ptr().cast();
+        let len = self.ram.len() * std::mem::size_of::<u64>();
+
+        unsafe { std::slice::from_raw_parts_mut(ptr, len) }
     }
 
     fn range_null_terminated(&self, addr: u64) -> Result<Range<usize>, AddrError> {
         let start = usize::try_from(addr).map_err(|_| AddrError::OutOfRange)?;
-
-        let end = self
-            .ram
+        let tail = self.as_bytes().get(start..).ok_or(AddrError::OutOfRange)?;
+        let pos = tail
             .iter()
-            .skip(start)
-            .position(|c| *c == 0) // TODO: position with overflow checking?
+            .position(|&c| c == 0)
             .ok_or(AddrError::OutOfRange)?;
 
-        // include null terminator
-        Ok(start..end + 1)
+        Ok(start..start + pos + 1)
     }
 
     pub fn read(&self, addr: u64, size: DataSize, extend: SignExtend) -> Result<u64, AddrError> {
-        let range = range(addr, 1, size)?;
+        let range = range(addr, 1, size as _, size as _)?;
 
-        let src = self.ram.get(range).ok_or(AddrError::OutOfRange)?;
+        let src = self.as_bytes().get(range).ok_or(AddrError::OutOfRange)?;
         let mut buffer = [0u8; 8];
         buffer[0..src.len()].copy_from_slice(src);
         let raw = u64::from_le_bytes(buffer);
@@ -80,31 +98,50 @@ impl DataMemory {
     }
 
     pub fn write(&mut self, addr: u64, data: u64, size: DataSize) -> Result<(), AddrError> {
-        let range = range(addr, 1, size)?;
+        let range = range(addr, 1, size as _, size as _)?;
 
-        let dest = self.ram.get_mut(range).ok_or(AddrError::OutOfRange)?;
+        let dest = self
+            .as_bytes_mut()
+            .get_mut(range)
+            .ok_or(AddrError::OutOfRange)?;
         let src = &data.to_le_bytes()[0..size as usize];
         dest.copy_from_slice(src);
 
         Ok(())
     }
 
-    pub fn slice(&self, addr: u64, size: usize) -> Result<&[u8], AddrError> {
-        let range = range(addr, size, DataSize::Byte)?;
+    pub fn bytes(&self, addr: u64, size: usize) -> Result<&[u8], AddrError> {
+        let range = range(addr, size, DataSize::Byte as _, 1)?;
 
-        Ok(&self.ram[range])
+        Ok(&self.as_bytes()[range])
     }
 
-    pub fn slice_mut(&mut self, addr: u64, size: usize) -> Result<&mut [u8], AddrError> {
-        let range = range(addr, size, DataSize::Byte)?;
+    pub fn bytes_mut(&mut self, addr: u64, size: usize) -> Result<&mut [u8], AddrError> {
+        let range = range(addr, size, DataSize::Byte as _, 1)?;
 
-        Ok(&mut self.ram[range])
+        Ok(&mut self.as_bytes_mut()[range])
     }
 
-    pub fn slice_null_terminated(&self, addr: u64) -> Result<&[u8], AddrError> {
+    pub fn bytes_null_terminated(&self, addr: u64) -> Result<&[u8], AddrError> {
         let range = self.range_null_terminated(addr)?;
 
-        Ok(&self.ram[range])
+        Ok(&self.as_bytes()[range])
+    }
+
+    pub fn raw_storage<T>(&self, addr: u64) -> Result<&[u8], AddrError> {
+        let data_size = std::mem::size_of::<T>();
+        let align = std::mem::align_of::<T>();
+        let range = range(addr, 1, data_size, align)?;
+
+        Ok(&self.as_bytes()[range])
+    }
+
+    pub fn raw_storage_mut<T>(&mut self, addr: u64) -> Result<&mut [u8], AddrError> {
+        let data_size = std::mem::size_of::<T>();
+        let align = std::mem::align_of::<T>();
+        let range = range(addr, 1, data_size, align)?;
+
+        Ok(&mut self.as_bytes_mut()[range])
     }
 }
 
@@ -164,11 +201,44 @@ mod test {
     fn slicing() {
         let mut dm = DataMemory::new(1 << 12);
         {
-            let mem = dm.slice_mut(0, 10).unwrap();
+            let mem = dm.bytes_mut(0, 10).unwrap();
             mem.fill(1);
         }
 
-        let mem = dm.slice(0, 10).unwrap();
+        let mem = dm.bytes(0, 10).unwrap();
         assert_eq!(mem, &[1, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn raw_storage() {
+        #[repr(C)]
+        #[derive(Copy, Clone, Debug)]
+        struct Thing {
+            x: i32,
+            y: i32,
+            z: i32,
+        }
+
+        let thing = Thing { x: 1, y: 2, z: 3 };
+        let mut dm = DataMemory::new(1 << 12);
+        {
+            let mem = dm.raw_storage_mut::<Thing>(0).unwrap();
+            let bytes = {
+                let ptr = &raw const thing;
+                let ptr = ptr.cast();
+
+                unsafe { std::slice::from_raw_parts(ptr, std::mem::size_of::<Thing>()) }
+            };
+
+            mem.copy_from_slice(bytes);
+        }
+
+        let raw = dm.raw_storage::<Thing>(0).unwrap();
+        let ptr = raw.as_ptr().cast::<Thing>();
+        let thing = unsafe { *ptr };
+
+        assert_eq!(thing.x, 1);
+        assert_eq!(thing.y, 2);
+        assert_eq!(thing.z, 3);
     }
 }
