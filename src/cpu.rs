@@ -529,9 +529,7 @@ mod test {
     }
 
     #[test]
-    fn syscall() {
-        use std::io::Write;
-
+    fn exit() {
         let program = [
             0x05d00893, // addi a7, x0, 93
             0x00900513, // addi a0, x0, 9
@@ -541,6 +539,11 @@ mod test {
         let result = cpu.run_test(program.len()).unwrap();
 
         assert_eq!(result, ExecutionResult::Exit(9));
+    }
+
+    #[test]
+    fn file_write() {
+        use std::io::Write;
 
         let program = [
             0x03f00893, // addi a7, x0, 63

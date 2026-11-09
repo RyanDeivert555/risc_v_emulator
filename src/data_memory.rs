@@ -150,7 +150,7 @@ mod test {
     use super::*;
 
     #[test]
-    fn read_and_write() -> Result<(), AddrError> {
+    fn zero_extend() -> Result<(), AddrError> {
         let mut dm = DataMemory::new(1 << 12);
 
         dm.write(0, 0xffff_ffff_ffff_ffff, DataSize::Byte)?;
@@ -173,9 +173,39 @@ mod test {
         let value = dm.read(0, DataSize::Byte, SignExtend::Zero)?;
         assert_eq!(value, 0xff);
 
+        Ok(())
+    }
+
+    #[test]
+    fn sign_extend() -> Result<(), AddrError> {
+        let mut dm = DataMemory::new(1 << 12);
+
         dm.write(0, 0x80, DataSize::Byte)?;
         let value = dm.read(0, DataSize::Byte, SignExtend::Msb)?;
         assert_eq!(value, 0xffff_ffff_ffff_ff80);
+
+        dm.write(0, 0xffff_ffff_ffff_ffff, DataSize::Byte)?;
+        let value = dm.read(0, DataSize::Byte, SignExtend::Msb)?;
+        assert_eq!(value, 0xffff_ffff_ffff_ffff);
+
+        dm.write(0, 0xffff_ffff_ffff_ffff, DataSize::HalfWord)?;
+        let value = dm.read(0, DataSize::HalfWord, SignExtend::Msb)?;
+        assert_eq!(value, 0xffff_ffff_ffff_ffff);
+
+        dm.write(0, 0xffff_ffff_ffff_ffff, DataSize::Word)?;
+        let value = dm.read(0, DataSize::Word, SignExtend::Msb)?;
+        assert_eq!(value, 0xffff_ffff_ffff_ffff);
+
+        dm.write(0, 0xffff_ffff_ffff_ffff, DataSize::DoubleWord)?;
+        let value = dm.read(0, DataSize::DoubleWord, SignExtend::Msb)?;
+        assert_eq!(value, 0xffff_ffff_ffff_ffff);
+
+        Ok(())
+    }
+
+    #[test]
+    fn reinterpret() -> Result<(), AddrError> {
+        let mut dm = DataMemory::new(1 << 12);
 
         dm.write(0, 1, DataSize::Byte)?;
         dm.write(1, 1, DataSize::Byte)?;
@@ -235,6 +265,7 @@ mod test {
 
         let raw = dm.raw_storage::<Thing>(0).unwrap();
         let ptr = raw.as_ptr().cast::<Thing>();
+        // SAFETY: ptr is properly aligned, points to valid object
         let thing = unsafe { *ptr };
 
         assert_eq!(thing.x, 1);
