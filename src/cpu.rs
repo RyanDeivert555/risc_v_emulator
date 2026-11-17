@@ -23,13 +23,13 @@ pub enum CpuStepError {
 
 impl From<FetchError> for CpuStepError {
     fn from(value: FetchError) -> Self {
-        CpuStepError::InstructionMemory(value)
+        Self::InstructionMemory(value)
     }
 }
 
 impl From<AddrError> for CpuStepError {
     fn from(value: AddrError) -> Self {
-        CpuStepError::DataMemory(value)
+        Self::DataMemory(value)
     }
 }
 
@@ -108,6 +108,28 @@ impl Cpu {
 
         // https://jborza.com/post/2021-05-11-riscv-linux-syscalls
         match sys {
+            0 => {
+                let n = self.register_file.read(RegisterFile::A0) as libc::c_uint;
+                let ctx = {
+                    let addr = self.register_file.read(RegisterFile::A1);
+                    let raw = self.data_memory.raw_storage_mut::<libc::c_ulong>(addr)?;
+
+                    raw.as_mut_ptr().cast::<libc::c_ulong>()
+                };
+
+                let result = unsafe { libc::syscall(libc::SYS_io_setup, n, ctx) };
+                self.register_file.write(RegisterFile::A0, result as _);
+
+                Ok(ExecutionResult::Continue)
+            }
+            1 => {
+                let ctx = self.register_file.read(RegisterFile::A0) as libc::c_ulong;
+
+                let result = unsafe { libc::syscall(libc::SYS_io_destroy, ctx) };
+                self.register_file.write(RegisterFile::A0, result as _);
+
+                Ok(ExecutionResult::Continue)
+            }
             56 => {
                 let dir_fd = self.register_file.read(RegisterFile::A0) as libc::c_int;
                 let filename = {
@@ -159,28 +181,30 @@ impl Cpu {
             }
             63 => {
                 let fd = self.register_file.read(RegisterFile::A0) as libc::c_int;
-                let buffer = {
+                let (buffer, len) = {
                     let addr = self.register_file.read(RegisterFile::A1);
                     let count = self.register_file.read(RegisterFile::A2) as usize;
+                    let memory = self.data_memory.bytes_mut(addr, count)?;
 
-                    self.data_memory.bytes_mut(addr, count)?
+                    (memory.as_mut_ptr().cast(), memory.len())
                 };
 
-                let result = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
+                let result = unsafe { libc::read(fd, buffer, len) };
                 self.register_file.write(RegisterFile::A0, result as _);
 
                 Ok(ExecutionResult::Continue)
             }
             64 => {
                 let fd = self.register_file.read(RegisterFile::A0) as libc::c_int;
-                let buffer = {
+                let (buffer, len) = {
                     let addr = self.register_file.read(RegisterFile::A1);
                     let count = self.register_file.read(RegisterFile::A2) as usize;
+                    let memory = self.data_memory.bytes(addr, count)?;
 
-                    self.data_memory.bytes(addr, count)?
+                    (memory.as_ptr().cast(), memory.len())
                 };
 
-                let result = unsafe { libc::write(fd, buffer.as_ptr().cast(), buffer.len()) };
+                let result = unsafe { libc::write(fd, buffer, len) };
                 self.register_file.write(RegisterFile::A0, result as _);
 
                 Ok(ExecutionResult::Continue)

@@ -118,27 +118,27 @@ const OP_START: u32 = 0;
 const OP_END: u32 = 7;
 
 fn f7(value: u32) -> u8 {
-    bits(value, F7_START, F7_END) as u8
+    bits(value, F7_START, F7_END) as _
 }
 
 fn rs2(value: u32) -> u8 {
-    bits(value, RS2_START, RS2_END) as u8
+    bits(value, RS2_START, RS2_END) as _
 }
 
 fn rs1(value: u32) -> u8 {
-    bits(value, RS1_START, RS1_END) as u8
+    bits(value, RS1_START, RS1_END) as _
 }
 
 fn f3(value: u32) -> u8 {
-    bits(value, F3_START, F3_END) as u8
+    bits(value, F3_START, F3_END) as _
 }
 
 fn rd(value: u32) -> u8 {
-    bits(value, RD_START, RD_END) as u8
+    bits(value, RD_START, RD_END) as _
 }
 
 fn op(value: u32) -> u8 {
-    bits(value, OP_START, OP_END) as u8
+    bits(value, OP_START, OP_END) as _
 }
 
 fn i_type_imm(value: u32) -> i64 {
