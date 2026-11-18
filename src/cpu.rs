@@ -68,7 +68,7 @@ fn alu(lhs: u64, rhs: u64, mode: AluOp, width: AluWidth) -> u64 {
         (Op::Srl, AluWidth::DoubleWord) => lhs.wrapping_shr(rhs as _),
         (Op::Srl, AluWidth::Word) => (lhs as u32).wrapping_shr(rhs as _) as i32 as i64 as u64,
         (Op::Sra, AluWidth::DoubleWord) => lhs.cast_signed().wrapping_shr(rhs as _).cast_unsigned(),
-        (Op::Sra, AluWidth::Word) => (lhs as u32).wrapping_shr(rhs as _) as i32 as i64 as u64,
+        (Op::Sra, AluWidth::Word) => (lhs as i32).wrapping_shr(rhs as _) as i64 as u64,
         (Op::Slt, _) => u64::from(lhs.cast_signed() < rhs.cast_signed()),
         (Op::Sltu, _) => u64::from(lhs < rhs),
     }
@@ -233,12 +233,12 @@ impl Cpu {
             200 => {
                 let sockfd = self.register_file.read(RegisterFile::A0) as libc::c_int;
                 let sockaddr = {
-                    let addr = self.register_file.read(RegisterFile::A0);
+                    let addr = self.register_file.read(RegisterFile::A1);
                     let raw = self.data_memory.raw_storage::<libc::sockaddr>(addr)?;
 
                     raw.as_ptr().cast()
                 };
-                let addrlen = self.register_file.read(RegisterFile::A1) as libc::socklen_t;
+                let addrlen = self.register_file.read(RegisterFile::A2) as libc::socklen_t;
 
                 let result = unsafe { libc::bind(sockfd, sockaddr, addrlen) };
                 self.register_file.write(RegisterFile::A0, result as _);
@@ -591,5 +591,172 @@ mod test {
 
         let mem = cpu.data_memory.bytes(0, s.len()).unwrap();
         assert_eq!(mem, b"hello");
+    }
+
+    #[test]
+    fn cpu_creation_and_stack_init() {
+        // ram_size must be a multiple of 16
+        assert!(matches!(
+            Cpu::new(&[], 18),
+            Err(CpuCreationError::RamMisalign)
+        ));
+
+        let ram_size = 1 << 12;
+        let cpu = Cpu::new(&[], ram_size).unwrap();
+        assert_eq!(cpu.register_file.read(RegisterFile::STACK_PTR), ram_size);
+        assert_eq!(cpu.pc, 0);
+    }
+
+    #[test]
+    fn rv64_word_and_shift_operations() {
+        let program = [
+            0xfff00093, // addi x1, x0, -1
+            0x0010811b, // addiw x2, x1, 1         -> 0
+            0x800001b7, // lui x3, 0x80000         -> 0xffffffff_80000000
+            0xfff1821b, // addiw x4, x3, -1        -> 0x00000000_7fffffff (32-bit wrap + sign-ext)
+            0xff000293, // addi x5, x0, -16
+            0x00200313, // addi x6, x0, 2
+            0x0062d3bb, // srlw x7, x5, x6         -> 0x3ffffffc
+            0x4062d43b, // sraw x8, x5, x6         -> -4 (0xffffffff_fffffffc)
+            0x0062a4b3, // slt x9, x5, x6          -> 1 (signed: -16 < 2)
+            0x0062b533, // sltu x10, x5, x6        -> 0 (unsigned: 0xfff..f0 > 2)
+        ];
+
+        let mut cpu = Cpu::new(&program, 1 << 12).unwrap();
+        cpu.run_test(program.len()).unwrap();
+
+        assert_eq!(cpu.register_file.read(2), 0);
+        assert_eq!(cpu.register_file.read(4), 0x7fffffff);
+        assert_eq!(cpu.register_file.read(7), 0x3ffffffc);
+        assert_eq!(cpu.register_file.read(8), (-4i64).cast_unsigned());
+        assert_eq!(cpu.register_file.read(9), 1);
+        assert_eq!(cpu.register_file.read(10), 0);
+    }
+
+    #[test]
+    fn upper_immediates() {
+        let program = [
+            0x123450b7, // lui x1, 0x12345         -> 0x12345000
+            0x80000137, // lui x2, 0x80000         -> 0xffffffff_80000000
+            0x00001197, // auipc x3, 0x1           -> pc (8) + 0x1000 = 0x1008
+        ];
+
+        let mut cpu = Cpu::new(&program, 1 << 12).unwrap();
+        cpu.run_test(program.len()).unwrap();
+
+        assert_eq!(cpu.register_file.read(1), 0x12345000);
+        assert_eq!(cpu.register_file.read(2), 0xffffffff_80000000);
+        assert_eq!(cpu.register_file.read(3), 0x1008);
+    }
+
+    #[test]
+    fn branches() {
+        let program = [
+            0xfff00093, // 0x00: addi x1, x0, -1
+            0x00100113, // 0x04: addi x2, x0, 1
+            0x0020e663, // 0x08: bltu x1, x2, +12  (not taken: -1u > 1u)
+            0x0020c463, // 0x0c: blt x1, x2, +8    (taken: -1 < 1 -> jumps to 0x14)
+            0x06300193, // 0x10: addi x3, x0, 99   (skipped)
+            0x02a00213, // 0x14: addi x4, x0, 42   (executed)
+        ];
+
+        let mut cpu = Cpu::new(&program, 1 << 12).unwrap();
+        cpu.run_test(5).unwrap();
+
+        assert_eq!(cpu.register_file.read(3), 0);
+        assert_eq!(cpu.register_file.read(4), 42);
+    }
+
+    #[test]
+    fn jumps_jal_and_jalr() {
+        let program = [
+            0x008000ef, // 0x00: jal x1, +8          (x1 = 0x04, jumps to 0x08)
+            0x06300113, // 0x04: addi x2, x0, 99     (skipped)
+            0x01400193, // 0x08: addi x3, x0, 20     (x3 = 20)
+            0x001181e7, // 0x0c: jalr x3, 1(x3)      (target = (20+1) & !1 = 0x14, x3 = 0x10)
+            0x06300213, // 0x10: addi x4, x0, 99     (skipped)
+            0x00700293, // 0x14: addi x5, x0, 7      (executed)
+        ];
+
+        let mut cpu = Cpu::new(&program, 1 << 12).unwrap();
+        cpu.run_test(4).unwrap();
+
+        assert_eq!(cpu.register_file.read(1), 0x04);
+        assert_eq!(cpu.register_file.read(3), 0x10);
+        assert_eq!(cpu.register_file.read(4), 0);
+        assert_eq!(cpu.register_file.read(5), 7);
+    }
+
+    #[test]
+    fn subword_loads_and_stores() {
+        let program = [
+            0x08000093, // addi x1, x0, 0x80
+            0x00100023, // sb x1, 0(x0)
+            0x00000103, // lb x2, 0(x0) -> sign-extended (-128)
+            0x00004183, // lbu x3, 0(x0) -> zero-extended (128)
+        ];
+
+        let mut cpu = Cpu::new(&program, 1 << 12).unwrap();
+        cpu.run_test(program.len()).unwrap();
+
+        assert_eq!(cpu.register_file.read(2), (-128i64).cast_unsigned());
+        assert_eq!(cpu.register_file.read(3), 0x80);
+    }
+
+    #[test]
+    fn ebreak_and_unsupported_syscall() {
+        let bp_program = [0x00100073]; // ebreak
+        let mut cpu = Cpu::new(&bp_program, 1 << 12).unwrap();
+        assert_eq!(cpu.run().unwrap(), ExecutionResult::Breakpoint);
+
+        let bad_sys_program = [
+            0x3e700893, // addi a7, x0, 999
+            0x00000073, // ecall
+        ];
+        let mut cpu = Cpu::new(&bad_sys_program, 1 << 12).unwrap();
+        assert_eq!(
+            cpu.run().unwrap_err(),
+            CpuStepError::UnsupportedSyscall(999)
+        );
+    }
+
+    #[test]
+    fn syscalls_write_and_getpid() {
+        use std::io::Read;
+
+        let write_program = [
+            0x04000893, // addi a7, x0, 64 (write)
+            0x00000593, // addi a1, x0, 0  (buf = 0)
+            0x00500613, // addi a2, x0, 5  (count = 5)
+            0x00000073, // ecall
+        ];
+
+        let (mut reader, writer) = std::io::pipe().unwrap();
+        let mut cpu = Cpu::new(&write_program, 1 << 12).unwrap();
+        cpu.data_memory
+            .bytes_mut(0, 5)
+            .unwrap()
+            .copy_from_slice(b"world");
+        cpu.register_file
+            .write(RegisterFile::A0, writer.as_raw_fd() as _);
+
+        cpu.run_test(write_program.len()).unwrap();
+        drop(writer);
+
+        assert_eq!(cpu.register_file.read(RegisterFile::A0), 5);
+        let mut out = [0u8; 5];
+        reader.read_exact(&mut out).unwrap();
+        assert_eq!(&out, b"world");
+
+        let pid_program = [
+            0x0ac00893, // addi a7, x0, 172 (getpid)
+            0x00000073, // ecall
+        ];
+        let mut cpu = Cpu::new(&pid_program, 1 << 12).unwrap();
+        cpu.run_test(pid_program.len()).unwrap();
+        assert_eq!(
+            cpu.register_file.read(RegisterFile::A0),
+            std::process::id() as u64
+        );
     }
 }

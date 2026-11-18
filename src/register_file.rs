@@ -10,13 +10,13 @@ impl RegisterFile {
     pub const A1: u8 = 11;
     pub const A2: u8 = 12;
     pub const A3: u8 = 13;
-    #[allow(unused)]
+    #[allow(unused, reason = "Register not used yet")]
     pub const A4: u8 = 14;
-    #[allow(unused)]
+    #[allow(unused, reason = "Register not used yet")]
     pub const A5: u8 = 15;
-    #[allow(unused)]
+    #[allow(unused, reason = "Register not used yet")]
     pub const A6: u8 = 16;
-    #[allow(unused)]
+    #[allow(unused, reason = "Register not used yet")]
     pub const A7: u8 = 17;
 
     pub fn new() -> Self {

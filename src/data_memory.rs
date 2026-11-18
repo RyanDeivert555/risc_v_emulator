@@ -113,19 +113,21 @@ impl DataMemory {
     pub fn bytes(&self, addr: u64, size: usize) -> Result<&[u8], AddrError> {
         let range = range(addr, size, DataSize::Byte as _, 1)?;
 
-        Ok(&self.as_bytes()[range])
+        self.as_bytes().get(range).ok_or(AddrError::OutOfRange)
     }
 
     pub fn bytes_mut(&mut self, addr: u64, size: usize) -> Result<&mut [u8], AddrError> {
         let range = range(addr, size, DataSize::Byte as _, 1)?;
 
-        Ok(&mut self.as_bytes_mut()[range])
+        self.as_bytes_mut()
+            .get_mut(range)
+            .ok_or(AddrError::OutOfRange)
     }
 
     pub fn bytes_null_terminated(&self, addr: u64) -> Result<&[u8], AddrError> {
         let range = self.range_null_terminated(addr)?;
 
-        Ok(&self.as_bytes()[range])
+        self.as_bytes().get(range).ok_or(AddrError::OutOfRange)
     }
 
     pub fn raw_storage<T>(&self, addr: u64) -> Result<&[u8], AddrError> {
@@ -133,7 +135,7 @@ impl DataMemory {
         let align = std::mem::align_of::<T>();
         let range = range(addr, 1, data_size, align)?;
 
-        Ok(&self.as_bytes()[range])
+        self.as_bytes().get(range).ok_or(AddrError::OutOfRange)
     }
 
     pub fn raw_storage_mut<T>(&mut self, addr: u64) -> Result<&mut [u8], AddrError> {
@@ -141,7 +143,9 @@ impl DataMemory {
         let align = std::mem::align_of::<T>();
         let range = range(addr, 1, data_size, align)?;
 
-        Ok(&mut self.as_bytes_mut()[range])
+        self.as_bytes_mut()
+            .get_mut(range)
+            .ok_or(AddrError::OutOfRange)
     }
 }
 
@@ -271,5 +275,160 @@ mod test {
         assert_eq!(thing.x, 1);
         assert_eq!(thing.y, 2);
         assert_eq!(thing.z, 3);
+    }
+
+    #[test]
+    fn alignment_errors() {
+        let mut dm = DataMemory::new(1 << 12);
+
+        // HalfWord requires 2-byte alignment
+        assert_eq!(
+            dm.write(1, 0, DataSize::HalfWord),
+            Err(AddrError::Misaligned)
+        );
+        assert_eq!(
+            dm.read(1, DataSize::HalfWord, SignExtend::Zero),
+            Err(AddrError::Misaligned)
+        );
+        assert!(dm.write(2, 0x1234, DataSize::HalfWord).is_ok());
+
+        // Word requires 4-byte alignment
+        for offset in [1, 2, 3] {
+            assert_eq!(
+                dm.write(offset, 0, DataSize::Word),
+                Err(AddrError::Misaligned)
+            );
+            assert_eq!(
+                dm.read(offset, DataSize::Word, SignExtend::Zero),
+                Err(AddrError::Misaligned)
+            );
+        }
+        assert!(dm.write(4, 0x1234_5678, DataSize::Word).is_ok());
+
+        // DoubleWord requires 8-byte alignment
+        assert_eq!(
+            dm.write(4, 0, DataSize::DoubleWord),
+            Err(AddrError::Misaligned)
+        );
+        assert_eq!(
+            dm.read(4, DataSize::DoubleWord, SignExtend::Zero),
+            Err(AddrError::Misaligned)
+        );
+        assert!(
+            dm.write(8, 0x1234_5678_9abc_def0, DataSize::DoubleWord)
+                .is_ok()
+        );
+
+        // raw_storage enforces T's alignment
+        assert_eq!(dm.raw_storage::<u32>(2).unwrap_err(), AddrError::Misaligned);
+        assert_eq!(
+            dm.raw_storage_mut::<u64>(4).unwrap_err(),
+            AddrError::Misaligned
+        );
+    }
+
+    #[test]
+    fn bounds_and_overflow() {
+        let mut dm = DataMemory::new(16);
+
+        // Last valid address for each width
+        assert!(dm.write(15, 0xaa, DataSize::Byte).is_ok());
+        assert!(dm.write(14, 0xbbbb, DataSize::HalfWord).is_ok());
+        assert!(dm.write(12, 0xcccc_cccc, DataSize::Word).is_ok());
+        assert!(
+            dm.write(8, 0xdddd_dddd_dddd_dddd, DataSize::DoubleWord)
+                .is_ok()
+        );
+
+        // One step past the end of RAM
+        assert_eq!(dm.write(16, 0, DataSize::Byte), Err(AddrError::OutOfRange));
+        assert_eq!(
+            dm.read(16, DataSize::Byte, SignExtend::Zero),
+            Err(AddrError::OutOfRange)
+        );
+        assert_eq!(
+            dm.write(16, 0, DataSize::HalfWord),
+            Err(AddrError::OutOfRange)
+        );
+        assert_eq!(dm.write(16, 0, DataSize::Word), Err(AddrError::OutOfRange));
+        assert_eq!(
+            dm.write(16, 0, DataSize::DoubleWord),
+            Err(AddrError::OutOfRange)
+        );
+
+        // Address arithmetic overflow (0xffff_ffff_ffff_fffc is 4-byte aligned)
+        assert_eq!(
+            dm.read(u64::MAX - 3, DataSize::Word, SignExtend::Zero),
+            Err(AddrError::OutOfRange)
+        );
+
+        // Slice and raw_storage out-of-range checks
+        assert_eq!(dm.bytes(12, 5).unwrap_err(), AddrError::OutOfRange);
+        assert_eq!(dm.bytes_mut(16, 1).unwrap_err(), AddrError::OutOfRange);
+        assert_eq!(
+            dm.raw_storage::<u64>(16).unwrap_err(),
+            AddrError::OutOfRange
+        );
+        assert_eq!(
+            dm.raw_storage_mut::<u64>(16).unwrap_err(),
+            AddrError::OutOfRange
+        );
+    }
+
+    #[test]
+    fn sign_extend_boundaries() -> Result<(), AddrError> {
+        let mut dm = DataMemory::new(1 << 12);
+
+        // Positive MSB=0 values must not be sign-extended
+        dm.write(0, 0x7f, DataSize::Byte)?;
+        assert_eq!(dm.read(0, DataSize::Byte, SignExtend::Msb)?, 0x7f);
+
+        dm.write(0, 0x7fff, DataSize::HalfWord)?;
+        assert_eq!(dm.read(0, DataSize::HalfWord, SignExtend::Msb)?, 0x7fff);
+
+        dm.write(0, 0x7fff_ffff, DataSize::Word)?;
+        assert_eq!(dm.read(0, DataSize::Word, SignExtend::Msb)?, 0x7fff_ffff);
+
+        // Negative MSB=1 values for HalfWord and Word
+        dm.write(0, 0x8000, DataSize::HalfWord)?;
+        assert_eq!(
+            dm.read(0, DataSize::HalfWord, SignExtend::Msb)?,
+            0xffff_ffff_ffff_8000
+        );
+
+        dm.write(0, 0x8000_0000, DataSize::Word)?;
+        assert_eq!(
+            dm.read(0, DataSize::Word, SignExtend::Msb)?,
+            0xffff_ffff_8000_0000
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn null_terminated_strings() -> Result<(), AddrError> {
+        let mut dm = DataMemory::new(16);
+
+        // Empty C-string at offset 0
+        assert_eq!(dm.bytes_null_terminated(0)?, b"\0");
+
+        // String embedded in memory (includes trailing null byte)
+        dm.bytes_mut(4, 8)?.copy_from_slice(b"risc-v\0!");
+        assert_eq!(dm.bytes_null_terminated(4)?, b"risc-v\0");
+
+        // Start address out of bounds
+        assert_eq!(
+            dm.bytes_null_terminated(16).unwrap_err(),
+            AddrError::OutOfRange
+        );
+
+        // No null terminator present before end of RAM
+        dm.bytes_mut(0, 16)?.fill(b'a');
+        assert_eq!(
+            dm.bytes_null_terminated(0).unwrap_err(),
+            AddrError::OutOfRange
+        );
+
+        Ok(())
     }
 }
