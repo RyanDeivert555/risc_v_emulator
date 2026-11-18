@@ -412,28 +412,260 @@ mod test {
     use super::*;
 
     #[test]
-    fn creation() {
-        let instr = Instruction::new(0b0100000_00011_00010_000_00001_0110011); // sub x1, x2, x3
+    fn decode_r_type_all() {
+        let cases = [
+            (0x007302b3, AluOp::Add, AluWidth::DoubleWord), // add x5, x6, x7
+            (0x407302b3, AluOp::Sub, AluWidth::DoubleWord), // sub x5, x6, x7
+            (0x007342b3, AluOp::Xor, AluWidth::DoubleWord), // xor x5, x6, x7
+            (0x007362b3, AluOp::Or, AluWidth::DoubleWord),  // or x5, x6, x7
+            (0x007372b3, AluOp::And, AluWidth::DoubleWord), // and x5, x6, x7
+            (0x007312b3, AluOp::Sll, AluWidth::DoubleWord), // sll x5, x6, x7
+            (0x007352b3, AluOp::Srl, AluWidth::DoubleWord), // srl x5, x6, x7
+            (0x407352b3, AluOp::Sra, AluWidth::DoubleWord), // sra x5, x6, x7
+            (0x007322b3, AluOp::Slt, AluWidth::DoubleWord), // slt x5, x6, x7
+            (0x007332b3, AluOp::Sltu, AluWidth::DoubleWord), // sltu x5, x6, x7
+            (0x007302bb, AluOp::Add, AluWidth::Word),       // addw x5, x6, x7
+            (0x407302bb, AluOp::Sub, AluWidth::Word),       // subw x5, x6, x7
+            (0x007312bb, AluOp::Sll, AluWidth::Word),       // sllw x5, x6, x7
+            (0x007352bb, AluOp::Srl, AluWidth::Word),       // srlw x5, x6, x7
+            (0x407352bb, AluOp::Sra, AluWidth::Word),       // sraw x5, x6, x7
+        ];
+
+        for (raw, alu_op, alu_width) in cases {
+            assert_eq!(
+                Instruction::new(raw),
+                Instruction::AluRType {
+                    rd: 5,
+                    rs1: 6,
+                    rs2: 7,
+                    alu_op,
+                    alu_width,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn decode_i_type_and_shifts() {
+        // Negative 12-bit immediate (-2048)
         assert_eq!(
-            instr,
-            Instruction::AluRType {
+            Instruction::new(0x80010093), // addi x1, x2, -2048
+            Instruction::AluIType {
                 rd: 1,
                 rs1: 2,
-                rs2: 3,
-                alu_op: AluOp::Sub,
+                imm: -2048,
+                alu_op: AluOp::Add,
                 alu_width: AluWidth::DoubleWord,
             }
         );
 
-        let instr = Instruction::new(0b0000100_00010_00100_010_00000_0100011); // sw x2, 128(x4)
+        // RV64 6-bit shamt (shamt = 63 sets bit 25, making f7 = 0x01 / 0x21)
         assert_eq!(
-            instr,
-            Instruction::Store {
-                rs1: 4,
-                rs2: 2,
-                imm: 128,
-                size: DataSize::Word,
+            Instruction::new(0x03f11093), // slli x1, x2, 63
+            Instruction::AluIType {
+                rd: 1,
+                rs1: 2,
+                imm: 63,
+                alu_op: AluOp::Sll,
+                alu_width: AluWidth::DoubleWord,
             }
         );
+        assert_eq!(
+            Instruction::new(0x03f15093), // srli x1, x2, 63
+            Instruction::AluIType {
+                rd: 1,
+                rs1: 2,
+                imm: 63,
+                alu_op: AluOp::Srl,
+                alu_width: AluWidth::DoubleWord,
+            }
+        );
+        assert_eq!(
+            Instruction::new(0x43f15093), // srai x1, x2, 63
+            Instruction::AluIType {
+                rd: 1,
+                rs1: 2,
+                imm: 0x43f, // upper bits encode SRA; ALU masks shamt
+                alu_op: AluOp::Sra,
+                alu_width: AluWidth::DoubleWord,
+            }
+        );
+
+        // RV64I 32-bit word shifts (5-bit shamt = 31)
+        assert_eq!(
+            Instruction::new(0x01f1109b), // slliw x1, x2, 31
+            Instruction::AluIType {
+                rd: 1,
+                rs1: 2,
+                imm: 31,
+                alu_op: AluOp::Sll,
+                alu_width: AluWidth::Word,
+            }
+        );
+        assert_eq!(
+            Instruction::new(0x01f1509b), // srliw x1, x2, 31
+            Instruction::AluIType {
+                rd: 1,
+                rs1: 2,
+                imm: 31,
+                alu_op: AluOp::Srl,
+                alu_width: AluWidth::Word,
+            }
+        );
+        assert_eq!(
+            Instruction::new(0x41f1509b), // sraiw x1, x2, 31
+            Instruction::AluIType {
+                rd: 1,
+                rs1: 2,
+                imm: 0x41f,
+                alu_op: AluOp::Sra,
+                alu_width: AluWidth::Word,
+            }
+        );
+    }
+
+    #[test]
+    fn decode_loads_and_stores() {
+        let loads = [
+            (0xffc10083, DataSize::Byte, SignExtend::Msb), // lb x1, -4(x2)
+            (0xffc11083, DataSize::HalfWord, SignExtend::Msb), // lh x1, -4(x2)
+            (0xffc12083, DataSize::Word, SignExtend::Msb), // lw x1, -4(x2)
+            (0xffc13083, DataSize::DoubleWord, SignExtend::Zero), // ld x1, -4(x2)
+            (0xffc14083, DataSize::Byte, SignExtend::Zero), // lbu x1, -4(x2)
+            (0xffc15083, DataSize::HalfWord, SignExtend::Zero), // lhu x1, -4(x2)
+            (0xffc16083, DataSize::Word, SignExtend::Zero), // lwu x1, -4(x2)
+        ];
+
+        for (raw, size, extend) in loads {
+            assert_eq!(
+                Instruction::new(raw),
+                Instruction::Load {
+                    rd: 1,
+                    rs1: 2,
+                    imm: -4,
+                    size,
+                    extend,
+                }
+            );
+        }
+
+        let stores = [
+            (0xfe220823, DataSize::Byte),       // sb x2, -16(x4)
+            (0xfe221823, DataSize::HalfWord),   // sh x2, -16(x4)
+            (0xfe223823, DataSize::DoubleWord), // sd x2, -16(x4)
+        ];
+
+        for (raw, size) in stores {
+            assert_eq!(
+                Instruction::new(raw),
+                Instruction::Store {
+                    rs1: 4,
+                    rs2: 2,
+                    imm: -16,
+                    size,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn decode_branches_and_jumps() {
+        let branches = [
+            (0xfe208ce3, -8, Condition::Eq),    // beq x1, x2, -8
+            (0x00209863, 16, Condition::Ne),    // bne x1, x2, 16
+            (0x8020c063, -4096, Condition::Lt), // blt x1, x2, -4096 (min B-imm)
+            (0x7e20dfe3, 4094, Condition::Ge),  // bge x1, x2, 4094  (max B-imm)
+            (0xfe20ece3, -8, Condition::Ltu),   // bltu x1, x2, -8
+            (0x0020f463, 8, Condition::Geu),    // bgeu x1, x2, 8
+        ];
+
+        for (raw, imm, cond) in branches {
+            assert_eq!(
+                Instruction::new(raw),
+                Instruction::Branch {
+                    rs1: 1,
+                    rs2: 2,
+                    imm,
+                    cond,
+                }
+            );
+        }
+
+        // JAL min (-1 MiB) and max (+1 MiB - 2) offsets
+        assert_eq!(
+            Instruction::new(0x800000ef), // jal x1, -1048576
+            Instruction::Jal {
+                rd: 1,
+                imm: -1_048_576,
+            }
+        );
+        assert_eq!(
+            Instruction::new(0x7ffff0ef), // jal x1, 1048574
+            Instruction::Jal {
+                rd: 1,
+                imm: 1_048_574,
+            }
+        );
+
+        assert_eq!(
+            Instruction::new(0xff4100e7), // jalr x1, -12(x2)
+            Instruction::Jalr {
+                rd: 1,
+                rs1: 2,
+                imm: -12,
+            }
+        );
+    }
+
+    #[test]
+    fn decode_upper_and_system() {
+        // Sign-extension of bit 31 in U-type immediates
+        assert_eq!(
+            Instruction::new(0x800000b7), // lui x1, 0x80000
+            Instruction::Lui {
+                rd: 1,
+                imm: -0x8000_0000,
+            }
+        );
+        assert_eq!(
+            Instruction::new(0x12345097), // auipc x1, 0x12345
+            Instruction::Auipc {
+                rd: 1,
+                imm: 0x1234_5000,
+            }
+        );
+
+        assert_eq!(Instruction::new(0x0000000f), Instruction::Fence);
+        assert_eq!(Instruction::new(0x00000073), Instruction::ECall);
+        assert_eq!(Instruction::new(0x00100073), Instruction::EBreak);
+        assert_eq!(
+            Instruction::from_bytes(0x00100073u32.to_le_bytes()),
+            Instruction::EBreak
+        );
+    }
+
+    #[test]
+    fn instruction_memory_load_and_fetch() {
+        // Rejects byte slices whose length is not a multiple of 4
+        assert!(matches!(
+            InstructionMemory::from_bytes(&[0x13, 0x00, 0x00]),
+            Err(InstructionLoadError)
+        ));
+
+        let words = [0x0000000f_u32, 0x00000073, 0x00100073];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let imem = InstructionMemory::from_bytes(&bytes).unwrap();
+
+        assert_eq!(imem.fetch(0), Ok(Instruction::Fence));
+        assert_eq!(imem.fetch(4), Ok(Instruction::ECall));
+        assert_eq!(imem.fetch(8), Ok(Instruction::EBreak));
+
+        // Unaligned PC
+        assert_eq!(imem.fetch(2), Err(FetchError::Misaligned));
+        assert_eq!(imem.fetch(5), Err(FetchError::Misaligned));
+
+        // Out-of-range PC
+        assert_eq!(imem.fetch(12), Err(FetchError::OutOfRange));
+        assert_eq!(imem.fetch(u64::MAX - 3), Err(FetchError::OutOfRange));
     }
 }
