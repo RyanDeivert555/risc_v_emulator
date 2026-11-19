@@ -21,6 +21,24 @@ pub enum CpuStepError {
     UnsupportedSyscall(u64),
 }
 
+impl std::fmt::Display for CpuStepError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InstructionMemory(FetchError::OutOfRange) => {
+                write!(f, "instruction out of range")
+            }
+            Self::InstructionMemory(FetchError::Misaligned) => {
+                write!(f, "misaliged instruction access")
+            }
+            Self::DataMemory(AddrError::OutOfRange) => write!(f, "memory out of range"),
+            Self::DataMemory(AddrError::Misaligned) => write!(f, "misaligned memory access"),
+            Self::UnsupportedSyscall(sys) => write!(f, "unsupported or invalid syscall: {}", sys),
+        }
+    }
+}
+
+impl std::error::Error for CpuStepError {}
+
 impl From<FetchError> for CpuStepError {
     fn from(value: FetchError) -> Self {
         Self::InstructionMemory(value)
@@ -43,12 +61,25 @@ pub enum ExecutionResult {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum CpuCreationError {
     RamMisalign,
-    InstuctionLoad,
+    InstructionLoad,
+    InvalidElf,
 }
+
+impl std::fmt::Display for CpuCreationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RamMisalign => write!(f, "ram size is not a multiple of 16"),
+            Self::InstructionLoad => write!(f, "invalid instruction in binary"),
+            Self::InvalidElf => write!(f, "invalid ELF file"),
+        }
+    }
+}
+
+impl std::error::Error for CpuCreationError {}
 
 impl From<InstructionLoadError> for CpuCreationError {
     fn from(_: InstructionLoadError) -> Self {
-        Self::InstuctionLoad
+        Self::InstructionLoad
     }
 }
 
@@ -75,7 +106,34 @@ fn alu(lhs: u64, rhs: u64, mode: AluOp, width: AluWidth) -> u64 {
 }
 
 impl Cpu {
-    pub fn new(instructions: &[u32], ram_size: u64) -> Result<Self, CpuCreationError> {
+    fn build(
+        code: InstructionMemory,
+        pc: u64,
+        data_memory: DataMemory,
+        ram_size: u64,
+    ) -> Result<Self, CpuCreationError> {
+        if !ram_size.is_multiple_of(16) {
+            return Err(CpuCreationError::RamMisalign);
+        }
+
+        let mut register_file = RegisterFile::new();
+        register_file.write(RegisterFile::STACK_PTR, ram_size);
+
+        Ok(Self {
+            instruction_memory: code,
+            register_file,
+            data_memory,
+            pc,
+        })
+    }
+
+    #[allow(unused)]
+    pub fn new(
+        instructions: &[u32],
+        pc: u64,
+        virtual_address: u64,
+        ram_size: u64,
+    ) -> Result<Self, CpuCreationError> {
         let bytes = {
             let ptr = instructions.as_ptr().cast();
             let len = std::mem::size_of_val(instructions);
@@ -84,22 +142,146 @@ impl Cpu {
             unsafe { std::slice::from_raw_parts(ptr, len) }
         };
 
-        Self::from_bytes(bytes, ram_size)
+        Self::from_bytes(bytes, pc, virtual_address, ram_size)
     }
 
-    pub fn from_bytes(bytes: &[u8], ram_size: u64) -> Result<Self, CpuCreationError> {
-        if !ram_size.is_multiple_of(16) {
-            Err(CpuCreationError::RamMisalign)
-        } else {
-            let mut register_file = RegisterFile::new();
-            register_file.write(RegisterFile::STACK_PTR, ram_size);
+    pub fn from_bytes(
+        bytes: &[u8],
+        pc: u64,
+        virtual_address: u64,
+        ram_size: u64,
+    ) -> Result<Self, CpuCreationError> {
+        let instruction_memory = InstructionMemory::from_bytes(bytes, virtual_address)?;
+        let data_memory = DataMemory::new(ram_size);
 
-            Ok(Self {
-                instruction_memory: InstructionMemory::from_bytes(bytes)?,
-                register_file,
-                data_memory: DataMemory::new(ram_size),
-                pc: 0,
-            })
+        Self::build(instruction_memory, pc, data_memory, ram_size)
+    }
+
+    #[allow(unused)]
+    pub fn from_flat_binary(bytes: &[u8], ram_size: u64) -> Result<Self, CpuCreationError> {
+        let instruction_memory = InstructionMemory::from_bytes(bytes, 0)?;
+        let data_memory = DataMemory::new(ram_size);
+
+        Self::build(instruction_memory, 0, data_memory, ram_size)
+    }
+
+    pub fn from_elf(elf: &[u8], ram_size: u64) -> Result<Self, CpuCreationError> {
+        fn validate_bytes(
+            bytes: &[u8],
+            range: std::ops::Range<usize>,
+            target: &[u8],
+        ) -> Result<(), CpuCreationError> {
+            let section = bytes.get(range).ok_or(CpuCreationError::InvalidElf)?;
+
+            if section == target {
+                Ok(())
+            } else {
+                Err(CpuCreationError::InvalidElf)
+            }
+        }
+
+        fn validate_byte(bytes: &[u8], index: usize, target: u8) -> Result<(), CpuCreationError> {
+            let section = bytes.get(index).ok_or(CpuCreationError::InvalidElf)?;
+
+            if *section == target {
+                Ok(())
+            } else {
+                Err(CpuCreationError::InvalidElf)
+            }
+        }
+
+        // https://en.wikipedia.org/wiki/Executable_and_Linkable_Format
+        if elf.len() < 64 {
+            Err(CpuCreationError::InvalidElf)
+        } else {
+            // ELF magic header
+            validate_bytes(elf, 0..4, &[0x7f, 0x45, 0x4c, 0x46])?;
+            // 64-bit elf
+            validate_byte(elf, 4, 2)?;
+            // little endian
+            validate_byte(elf, 5, 1)?;
+            // executable
+            validate_bytes(elf, 0x10..0x12, &0x02u16.to_le_bytes())?;
+            // RISC-V arch
+            validate_bytes(elf, 0x12..0x14, &0xf3u16.to_le_bytes())?;
+            // we know it is a valid 64-bit ELF executable now, treat it as such
+            let pc = u64::from_le_bytes(elf[0x18..0x20].try_into().unwrap());
+            let program_header_offset =
+                u64::from_le_bytes(elf[0x20..0x28].try_into().unwrap()) as usize;
+            let program_header_size =
+                u16::from_le_bytes(elf[0x36..0x38].try_into().unwrap()) as usize;
+            let program_header_count =
+                u16::from_le_bytes(elf[0x38..0x3a].try_into().unwrap()) as usize;
+
+            let mut data_memory = DataMemory::new(ram_size);
+            let mut code: Vec<u8> = Vec::new();
+            let mut code_virtual_address = 0;
+
+            if program_header_size < 56 {
+                return Err(CpuCreationError::InvalidElf);
+            }
+
+            for i in 0..program_header_count {
+                let offset = program_header_offset
+                    .checked_add(i * program_header_size)
+                    .ok_or(CpuCreationError::InvalidElf)?;
+                let program_header = elf
+                    .get(offset..offset + 56)
+                    .ok_or(CpuCreationError::InvalidElf)?;
+
+                let ty = u32::from_le_bytes(program_header[0..4].try_into().unwrap());
+                // Skip non-loadable segments
+                if ty != 1 {
+                    continue;
+                }
+
+                let flags = u32::from_le_bytes(program_header[0x04..0x08].try_into().unwrap());
+                let program_offset =
+                    u64::from_le_bytes(program_header[0x08..0x10].try_into().unwrap()) as usize;
+                let virutal_address =
+                    u64::from_le_bytes(program_header[0x10..0x18].try_into().unwrap());
+                let segment_size =
+                    u64::from_le_bytes(program_header[0x20..0x28].try_into().unwrap()) as usize;
+                let memory_size =
+                    u64::from_le_bytes(program_header[0x28..0x30].try_into().unwrap()) as usize;
+
+                if segment_size > memory_size {
+                    return Err(CpuCreationError::InvalidElf);
+                }
+
+                let end_offset = program_offset
+                    .checked_add(segment_size)
+                    .ok_or(CpuCreationError::InvalidElf)?;
+                let segment_data = elf
+                    .get(program_offset..end_offset)
+                    .ok_or(CpuCreationError::InvalidElf)?;
+
+                if flags & 0x1 != 0 {
+                    code_virtual_address = virutal_address;
+                    code = segment_data.to_vec();
+                    // Pad trailing unaligned .rodata bytes so InstructionMemory::from_bytes succeeds
+                    let rem = code.len() % 4;
+                    if rem != 0 {
+                        code.resize(code.len() + (4 - rem), 0);
+                    }
+                }
+
+                if memory_size > 0 {
+                    let dest = data_memory
+                        .bytes_mut(virutal_address, memory_size)
+                        .map_err(|_| CpuCreationError::InvalidElf)?;
+                    dest[..segment_size].copy_from_slice(segment_data);
+                    dest[segment_size..].fill(0);
+                }
+            }
+
+            if code.is_empty() {
+                return Err(CpuCreationError::InvalidElf);
+            }
+
+            let instruction_memory = InstructionMemory::from_bytes(&code, code_virtual_address)?;
+
+            Self::build(instruction_memory, pc, data_memory, ram_size)
         }
     }
 
@@ -460,7 +642,7 @@ mod test {
     #[should_panic]
     fn invalid_program() {
         let program = [0xdeadbeef, 0xeefeff, 0xf00];
-        let mut cpu = Cpu::new(&program, 1 << 12).unwrap();
+        let mut cpu = Cpu::new(&program, 0, 0, 1 << 12).unwrap();
         cpu.run().unwrap();
     }
 
@@ -471,7 +653,7 @@ mod test {
             0x00a00113, // addi x2, x0, 10
             0x002080b3, // add x1, x1, x2
         ];
-        let mut cpu = Cpu::new(&program, 1 << 12).unwrap();
+        let mut cpu = Cpu::new(&program, 0, 0, 1 << 12).unwrap();
         // For testing
         cpu.register_file.write(RegisterFile::STACK_PTR, 0);
         cpu.run_test(program.len()).unwrap();
@@ -484,7 +666,7 @@ mod test {
             0x00a00113, // addi x2, x0, 10
             0x402080b3, // sub x1, x1, x2
         ];
-        let mut cpu = Cpu::new(&program, 1 << 12).unwrap();
+        let mut cpu = Cpu::new(&program, 0, 0, 1 << 12).unwrap();
         // For testing
         cpu.register_file.write(RegisterFile::STACK_PTR, 0);
         cpu.run_test(program.len()).unwrap();
@@ -497,7 +679,7 @@ mod test {
             0x00a00113, // addi x2, x0, 10
             0x0020f0b3, // and x1, x1, x2
         ];
-        let mut cpu = Cpu::new(&program, 1 << 12).unwrap();
+        let mut cpu = Cpu::new(&program, 0, 0, 1 << 12).unwrap();
         // For testing
         cpu.register_file.write(RegisterFile::STACK_PTR, 0);
         cpu.run_test(program.len()).unwrap();
@@ -513,7 +695,7 @@ mod test {
             0x00a00093, // addi x1, x0, 10
             0x0000a103, // lw x2, 0(x1)
         ];
-        let mut cpu = Cpu::new(&program, 1 << 12).unwrap();
+        let mut cpu = Cpu::new(&program, 0, 0, 1 << 12).unwrap();
         // For testing
         cpu.register_file.write(RegisterFile::STACK_PTR, 0);
         assert!(
@@ -526,7 +708,7 @@ mod test {
             0x06400113, // addi x2, x0, 100
             0x0020a023, // sw x2, 0(x1)
         ];
-        let mut cpu = Cpu::new(&program, 1 << 12).unwrap();
+        let mut cpu = Cpu::new(&program, 0, 0, 1 << 12).unwrap();
         // For testing
         cpu.register_file.write(RegisterFile::STACK_PTR, 0);
         cpu.run_test(program.len()).unwrap();
@@ -543,7 +725,7 @@ mod test {
             0x01400093, // addi x1, x0, 20
             0x0000a103, // lw x2, 0(x1)
         ];
-        let mut cpu = Cpu::new(&program, 16).unwrap();
+        let mut cpu = Cpu::new(&program, 0, 0, 16).unwrap();
         // For testing
         cpu.register_file.write(RegisterFile::STACK_PTR, 0);
         assert!(
@@ -559,7 +741,7 @@ mod test {
             0x00900513, // addi a0, x0, 9
             0x00000073, // ecall
         ];
-        let mut cpu = Cpu::new(&program, 1 << 12).unwrap();
+        let mut cpu = Cpu::new(&program, 0, 0, 1 << 12).unwrap();
         let result = cpu.run_test(program.len()).unwrap();
 
         assert_eq!(result, ExecutionResult::Exit(9));
@@ -580,7 +762,7 @@ mod test {
         let (reader, mut writer) = std::io::pipe().unwrap();
         writer.write_all(s).unwrap();
 
-        let mut cpu = Cpu::new(&program, 1 << 12).unwrap();
+        let mut cpu = Cpu::new(&program, 0, 0, 1 << 12).unwrap();
         // addi a0, x0, <fd>
         cpu.register_file
             .write(RegisterFile::A0, reader.as_raw_fd() as _);
@@ -597,12 +779,12 @@ mod test {
     fn cpu_creation_and_stack_init() {
         // ram_size must be a multiple of 16
         assert!(matches!(
-            Cpu::new(&[], 18),
+            Cpu::from_flat_binary(&[], 18),
             Err(CpuCreationError::RamMisalign)
         ));
 
         let ram_size = 1 << 12;
-        let cpu = Cpu::new(&[], ram_size).unwrap();
+        let cpu = Cpu::from_flat_binary(&[], ram_size).unwrap();
         assert_eq!(cpu.register_file.read(RegisterFile::STACK_PTR), ram_size);
         assert_eq!(cpu.pc, 0);
     }
@@ -622,7 +804,7 @@ mod test {
             0x0062b533, // sltu x10, x5, x6        -> 0 (unsigned: 0xfff..f0 > 2)
         ];
 
-        let mut cpu = Cpu::new(&program, 1 << 12).unwrap();
+        let mut cpu = Cpu::new(&program, 0, 0, 1 << 12).unwrap();
         cpu.run_test(program.len()).unwrap();
 
         assert_eq!(cpu.register_file.read(2), 0);
@@ -641,7 +823,7 @@ mod test {
             0x00001197, // auipc x3, 0x1           -> pc (8) + 0x1000 = 0x1008
         ];
 
-        let mut cpu = Cpu::new(&program, 1 << 12).unwrap();
+        let mut cpu = Cpu::new(&program, 0, 0, 1 << 12).unwrap();
         cpu.run_test(program.len()).unwrap();
 
         assert_eq!(cpu.register_file.read(1), 0x12345000);
@@ -660,7 +842,7 @@ mod test {
             0x02a00213, // 0x14: addi x4, x0, 42   (executed)
         ];
 
-        let mut cpu = Cpu::new(&program, 1 << 12).unwrap();
+        let mut cpu = Cpu::new(&program, 0, 0, 1 << 12).unwrap();
         cpu.run_test(5).unwrap();
 
         assert_eq!(cpu.register_file.read(3), 0);
@@ -678,7 +860,7 @@ mod test {
             0x00700293, // 0x14: addi x5, x0, 7      (executed)
         ];
 
-        let mut cpu = Cpu::new(&program, 1 << 12).unwrap();
+        let mut cpu = Cpu::new(&program, 0, 0, 1 << 12).unwrap();
         cpu.run_test(4).unwrap();
 
         assert_eq!(cpu.register_file.read(1), 0x04);
@@ -696,7 +878,7 @@ mod test {
             0x00004183, // lbu x3, 0(x0) -> zero-extended (128)
         ];
 
-        let mut cpu = Cpu::new(&program, 1 << 12).unwrap();
+        let mut cpu = Cpu::new(&program, 0, 0, 1 << 12).unwrap();
         cpu.run_test(program.len()).unwrap();
 
         assert_eq!(cpu.register_file.read(2), (-128i64).cast_unsigned());
@@ -706,14 +888,14 @@ mod test {
     #[test]
     fn ebreak_and_unsupported_syscall() {
         let bp_program = [0x00100073]; // ebreak
-        let mut cpu = Cpu::new(&bp_program, 1 << 12).unwrap();
+        let mut cpu = Cpu::new(&bp_program, 0, 0, 1 << 12).unwrap();
         assert_eq!(cpu.run().unwrap(), ExecutionResult::Breakpoint);
 
         let bad_sys_program = [
             0x3e700893, // addi a7, x0, 999
             0x00000073, // ecall
         ];
-        let mut cpu = Cpu::new(&bad_sys_program, 1 << 12).unwrap();
+        let mut cpu = Cpu::new(&bad_sys_program, 0, 0, 1 << 12).unwrap();
         assert_eq!(
             cpu.run().unwrap_err(),
             CpuStepError::UnsupportedSyscall(999)
@@ -732,7 +914,7 @@ mod test {
         ];
 
         let (mut reader, writer) = std::io::pipe().unwrap();
-        let mut cpu = Cpu::new(&write_program, 1 << 12).unwrap();
+        let mut cpu = Cpu::new(&write_program, 0, 0, 1 << 12).unwrap();
         cpu.data_memory
             .bytes_mut(0, 5)
             .unwrap()
@@ -752,11 +934,67 @@ mod test {
             0x0ac00893, // addi a7, x0, 172 (getpid)
             0x00000073, // ecall
         ];
-        let mut cpu = Cpu::new(&pid_program, 1 << 12).unwrap();
+        let mut cpu = Cpu::new(&pid_program, 0, 0, 1 << 12).unwrap();
         cpu.run_test(pid_program.len()).unwrap();
         assert_eq!(
             cpu.register_file.read(RegisterFile::A0),
             std::process::id() as u64
         );
+    }
+
+    #[test]
+    fn non_zero_virtual_address_and_elf() {
+        // Non-zero base virtual address
+        let program = [
+            0x00000097, // 0x1000: auipc x1, 0 -> 0x1000
+            0x05d00893, // 0x1004: addi a7, x0, 93
+            0x00700513, // 0x1008: addi a0, x0, 7
+            0x00000073, // 0x100c: ecall
+        ];
+        let mut cpu = Cpu::new(&program, 0x1000, 0x1000, 1 << 12).unwrap();
+        assert_eq!(cpu.run().unwrap(), ExecutionResult::Exit(7));
+        assert_eq!(cpu.register_file.read(1), 0x1000);
+
+        // Reject invalid ELF header
+        assert!(matches!(
+            Cpu::from_elf(b"not an elf", 1 << 12),
+            Err(CpuCreationError::InvalidElf)
+        ));
+
+        // Minimal valid 64-bit RISC-V ELF executable loaded at 0x1000
+        let code: Vec<u8> = [
+            0x02a00513u32, // addi a0, x0, 42
+            0x05d00893,    // addi a7, x0, 93
+            0x00000073,    // ecall
+        ]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+
+        // Header + program header + code
+        let mut elf = vec![0u8; 64 + 56 + code.len()];
+        elf[0..4].copy_from_slice(b"\x7fELF");
+        elf[4] = 2; // ELFCLASS64
+        elf[5] = 1; // ELFDATA2LSB
+        elf[0x10..0x12].copy_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+        elf[0x12..0x14].copy_from_slice(&0xf3u16.to_le_bytes()); // EM_RISCV
+        elf[0x18..0x20].copy_from_slice(&0x1000u64.to_le_bytes()); // e_entry
+        elf[0x20..0x28].copy_from_slice(&64u64.to_le_bytes()); // e_phoff
+        elf[0x36..0x38].copy_from_slice(&56u16.to_le_bytes()); // e_phentsize
+        elf[0x38..0x3a].copy_from_slice(&1u16.to_le_bytes()); // e_phnum
+
+        // Program header (PT_LOAD, PF_R | PF_X)
+        let ph = &mut elf[64..120];
+        ph[0x00..0x04].copy_from_slice(&1u32.to_le_bytes()); // PT_LOAD
+        ph[0x04..0x08].copy_from_slice(&5u32.to_le_bytes()); // PF_R | PF_X
+        ph[0x08..0x10].copy_from_slice(&120u64.to_le_bytes()); // p_offset
+        ph[0x10..0x18].copy_from_slice(&0x1000u64.to_le_bytes()); // p_vaddr
+        ph[0x20..0x28].copy_from_slice(&(code.len() as u64).to_le_bytes()); // p_filesz
+        ph[0x28..0x30].copy_from_slice(&(code.len() as u64).to_le_bytes()); // p_memsz
+
+        elf[120..].copy_from_slice(&code);
+
+        let mut cpu = Cpu::from_elf(&elf, 1 << 16).unwrap();
+        assert_eq!(cpu.run().unwrap(), ExecutionResult::Exit(42));
     }
 }

@@ -371,17 +371,19 @@ pub struct InstructionLoadError;
 
 pub struct InstructionMemory {
     instructions: Box<[u32]>,
+    base_address: u64,
 }
 
 impl InstructionMemory {
     #[allow(unused)]
-    pub fn new(instructions: &[u32]) -> Self {
+    pub fn new(instructions: &[u32], base_address: u64) -> Self {
         Self {
             instructions: Box::from(instructions),
+            base_address,
         }
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, InstructionLoadError> {
+    pub fn from_bytes(bytes: &[u8], base_address: u64) -> Result<Self, InstructionLoadError> {
         let (instructions, leftover) = bytes.as_chunks::<4>();
         if leftover.is_empty() {
             let instructions = instructions
@@ -389,7 +391,10 @@ impl InstructionMemory {
                 .map(|b| u32::from_le_bytes(*b))
                 .collect();
 
-            Ok(Self { instructions })
+            Ok(Self {
+                instructions,
+                base_address,
+            })
         } else {
             Err(InstructionLoadError)
         }
@@ -397,13 +402,18 @@ impl InstructionMemory {
 
     pub fn fetch(&self, pc: u64) -> Result<Instruction, FetchError> {
         if !pc.is_multiple_of(4) {
-            Err(FetchError::Misaligned)
-        } else {
-            self.instructions
-                .get((pc / 4) as usize)
-                .map(|instr| Instruction::new(*instr))
-                .ok_or(FetchError::OutOfRange)
+            return Err(FetchError::Misaligned);
         }
+
+        let offset = pc
+            .checked_sub(self.base_address)
+            .ok_or(FetchError::OutOfRange)?;
+        let idx = usize::try_from(offset / 4).map_err(|_| FetchError::OutOfRange)?;
+
+        self.instructions
+            .get(idx)
+            .map(|instr| Instruction::new(*instr))
+            .ok_or(FetchError::OutOfRange)
     }
 }
 
@@ -648,13 +658,13 @@ mod test {
     fn instruction_memory_load_and_fetch() {
         // Rejects byte slices whose length is not a multiple of 4
         assert!(matches!(
-            InstructionMemory::from_bytes(&[0x13, 0x00, 0x00]),
+            InstructionMemory::from_bytes(&[0x13, 0x00, 0x00], 0),
             Err(InstructionLoadError)
         ));
 
         let words = [0x0000000f_u32, 0x00000073, 0x00100073];
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
-        let imem = InstructionMemory::from_bytes(&bytes).unwrap();
+        let imem = InstructionMemory::from_bytes(&bytes, 0).unwrap();
 
         assert_eq!(imem.fetch(0), Ok(Instruction::Fence));
         assert_eq!(imem.fetch(4), Ok(Instruction::ECall));
