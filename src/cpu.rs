@@ -63,6 +63,7 @@ pub enum CpuCreationError {
     RamMisalign,
     InstructionLoad,
     InvalidElf,
+    OutOfRam,
 }
 
 impl std::fmt::Display for CpuCreationError {
@@ -71,6 +72,7 @@ impl std::fmt::Display for CpuCreationError {
             Self::RamMisalign => write!(f, "ram size is not a multiple of 16"),
             Self::InstructionLoad => write!(f, "invalid instruction in binary"),
             Self::InvalidElf => write!(f, "invalid ELF file"),
+            Self::OutOfRam => write!(f, "not enough ram"),
         }
     }
 }
@@ -269,7 +271,7 @@ impl Cpu {
                 if memory_size > 0 {
                     let dest = data_memory
                         .bytes_mut(virutal_address, memory_size)
-                        .map_err(|_| CpuCreationError::InvalidElf)?;
+                        .map_err(|_| CpuCreationError::OutOfRam)?;
                     dest[..segment_size].copy_from_slice(segment_data);
                     dest[segment_size..].fill(0);
                 }
