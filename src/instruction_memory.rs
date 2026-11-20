@@ -412,7 +412,7 @@ impl InstructionMemory {
 
         self.instructions
             .get(idx)
-            .map(|instr| Instruction::new(*instr))
+            .map(|&instr| Instruction::new(instr))
             .ok_or(FetchError::OutOfRange)
     }
 }

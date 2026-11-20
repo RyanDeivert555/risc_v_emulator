@@ -793,15 +793,15 @@ mod test {
     fn rv64_word_and_shift_operations() {
         let program = [
             0xfff00093, // addi x1, x0, -1
-            0x0010811b, // addiw x2, x1, 1         -> 0
-            0x800001b7, // lui x3, 0x80000         -> 0xffffffff_80000000
-            0xfff1821b, // addiw x4, x3, -1        -> 0x00000000_7fffffff (32-bit wrap + sign-ext)
+            0x0010811b, // addiw x2, x1, 1 -> 0
+            0x800001b7, // lui x3, 0x80000 -> 0xffffffff_80000000
+            0xfff1821b, // addiw x4, x3, -1 -> 0x00000000_7fffffff (32-bit wrap + sign-ext)
             0xff000293, // addi x5, x0, -16
             0x00200313, // addi x6, x0, 2
-            0x0062d3bb, // srlw x7, x5, x6         -> 0x3ffffffc
-            0x4062d43b, // sraw x8, x5, x6         -> -4 (0xffffffff_fffffffc)
-            0x0062a4b3, // slt x9, x5, x6          -> 1 (signed: -16 < 2)
-            0x0062b533, // sltu x10, x5, x6        -> 0 (unsigned: 0xfff..f0 > 2)
+            0x0062d3bb, // srlw x7, x5, x6 -> 0x3ffffffc
+            0x4062d43b, // sraw x8, x5, x6 -> -4 (0xffffffff_fffffffc)
+            0x0062a4b3, // slt x9, x5, x6 -> 1 (signed: -16 < 2)
+            0x0062b533, // sltu x10, x5, x6 -> 0 (unsigned: 0xfff..f0 > 2)
         ];
 
         let mut cpu = Cpu::new(&program, 0, 0, 1 << 12).unwrap();
@@ -818,9 +818,9 @@ mod test {
     #[test]
     fn upper_immediates() {
         let program = [
-            0x123450b7, // lui x1, 0x12345         -> 0x12345000
-            0x80000137, // lui x2, 0x80000         -> 0xffffffff_80000000
-            0x00001197, // auipc x3, 0x1           -> pc (8) + 0x1000 = 0x1008
+            0x123450b7, // lui x1, 0x12345 -> 0x12345000
+            0x80000137, // lui x2, 0x80000 -> 0xffffffff_80000000
+            0x00001197, // auipc x3, 0x1 -> pc (8) + 0x1000 = 0x1008
         ];
 
         let mut cpu = Cpu::new(&program, 0, 0, 1 << 12).unwrap();
@@ -836,10 +836,10 @@ mod test {
         let program = [
             0xfff00093, // 0x00: addi x1, x0, -1
             0x00100113, // 0x04: addi x2, x0, 1
-            0x0020e663, // 0x08: bltu x1, x2, +12  (not taken: -1u > 1u)
-            0x0020c463, // 0x0c: blt x1, x2, +8    (taken: -1 < 1 -> jumps to 0x14)
-            0x06300193, // 0x10: addi x3, x0, 99   (skipped)
-            0x02a00213, // 0x14: addi x4, x0, 42   (executed)
+            0x0020e663, // 0x08: bltu x1, x2, +12 (not taken: -1u > 1u)
+            0x0020c463, // 0x0c: blt x1, x2, +8 (taken: -1 < 1 -> jumps to 0x14)
+            0x06300193, // 0x10: addi x3, x0, 99 (skipped)
+            0x02a00213, // 0x14: addi x4, x0, 42 (executed)
         ];
 
         let mut cpu = Cpu::new(&program, 0, 0, 1 << 12).unwrap();
@@ -852,12 +852,12 @@ mod test {
     #[test]
     fn jumps_jal_and_jalr() {
         let program = [
-            0x008000ef, // 0x00: jal x1, +8          (x1 = 0x04, jumps to 0x08)
-            0x06300113, // 0x04: addi x2, x0, 99     (skipped)
-            0x01400193, // 0x08: addi x3, x0, 20     (x3 = 20)
-            0x001181e7, // 0x0c: jalr x3, 1(x3)      (target = (20+1) & !1 = 0x14, x3 = 0x10)
-            0x06300213, // 0x10: addi x4, x0, 99     (skipped)
-            0x00700293, // 0x14: addi x5, x0, 7      (executed)
+            0x008000ef, // 0x00: jal x1, +8 (x1 = 0x04, jumps to 0x08)
+            0x06300113, // 0x04: addi x2, x0, 99 (skipped)
+            0x01400193, // 0x08: addi x3, x0, 20 (x3 = 20)
+            0x001181e7, // 0x0c: jalr x3, 1(x3) (target = (20+1) & !1 = 0x14, x3 = 0x10)
+            0x06300213, // 0x10: addi x4, x0, 99 (skipped)
+            0x00700293, // 0x14: addi x5, x0, 7 (executed)
         ];
 
         let mut cpu = Cpu::new(&program, 0, 0, 1 << 12).unwrap();
@@ -908,8 +908,8 @@ mod test {
 
         let write_program = [
             0x04000893, // addi a7, x0, 64 (write)
-            0x00000593, // addi a1, x0, 0  (buf = 0)
-            0x00500613, // addi a2, x0, 5  (count = 5)
+            0x00000593, // addi a1, x0, 0 (buf = 0)
+            0x00500613, // addi a2, x0, 5 (count = 5)
             0x00000073, // ecall
         ];
 
