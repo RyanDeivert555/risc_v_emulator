@@ -14,6 +14,14 @@ pub enum Condition {
 pub enum AluOp {
     Add,
     Sub,
+    Mul,
+    MulHigh,
+    MulHighSignedU,
+    MulHighU,
+    Div,
+    DivU,
+    Rem,
+    RemU,
     Xor,
     Or,
     And,
@@ -188,6 +196,7 @@ impl Instruction {
         let op = op(instr);
 
         // https://book.rvemu.app/instruction-set/01-rv64i.html
+        // https://docs.riscv.org/reference/isa/v20260120/unpriv/intro.html
         match (f7, f3, op) {
             // R-Type
             (0x00, 0x0, 0b0110011) => Instruction::r_type(instr, AluOp::Add, AluWidth::DoubleWord),
@@ -260,6 +269,26 @@ impl Instruction {
             _ if instr == 0x00000073 => Instruction::ecall(),
             // ebreak
             _ if instr == 0x00100073 => Instruction::ebreak(),
+            // M extension
+            (0x01, 0x0, 0b0110011) => Instruction::r_type(instr, AluOp::Mul, AluWidth::DoubleWord),
+            (0x01, 0x1, 0b0110011) => {
+                Instruction::r_type(instr, AluOp::MulHigh, AluWidth::DoubleWord)
+            }
+            (0x01, 0x2, 0b0110011) => {
+                Instruction::r_type(instr, AluOp::MulHighSignedU, AluWidth::DoubleWord)
+            }
+            (0x01, 0x3, 0b0110011) => {
+                Instruction::r_type(instr, AluOp::MulHighU, AluWidth::DoubleWord)
+            }
+            (0x01, 0x4, 0b0110011) => Instruction::r_type(instr, AluOp::Div, AluWidth::DoubleWord),
+            (0x01, 0x5, 0b0110011) => Instruction::r_type(instr, AluOp::DivU, AluWidth::DoubleWord),
+            (0x01, 0x6, 0b0110011) => Instruction::r_type(instr, AluOp::Rem, AluWidth::DoubleWord),
+            (0x01, 0x7, 0b0110011) => Instruction::r_type(instr, AluOp::RemU, AluWidth::DoubleWord),
+            (0x01, 0x0, 0b0111011) => Instruction::r_type(instr, AluOp::Mul, AluWidth::Word),
+            (0x01, 0x4, 0b0111011) => Instruction::r_type(instr, AluOp::Div, AluWidth::Word),
+            (0x01, 0x5, 0b0111011) => Instruction::r_type(instr, AluOp::DivU, AluWidth::Word),
+            (0x01, 0x6, 0b0111011) => Instruction::r_type(instr, AluOp::Rem, AluWidth::Word),
+            (0x01, 0x7, 0b0111011) => Instruction::r_type(instr, AluOp::RemU, AluWidth::Word),
 
             (f7, f3, op) => unimplemented!("0x{:x} 0x{:x} 0b{:b}", f7, f3, op),
         }
@@ -424,21 +453,21 @@ mod test {
     #[test]
     fn decode_r_type_all() {
         let cases = [
-            (0x007302b3, AluOp::Add, AluWidth::DoubleWord), // add x5, x6, x7
-            (0x407302b3, AluOp::Sub, AluWidth::DoubleWord), // sub x5, x6, x7
-            (0x007342b3, AluOp::Xor, AluWidth::DoubleWord), // xor x5, x6, x7
-            (0x007362b3, AluOp::Or, AluWidth::DoubleWord),  // or x5, x6, x7
-            (0x007372b3, AluOp::And, AluWidth::DoubleWord), // and x5, x6, x7
-            (0x007312b3, AluOp::Sll, AluWidth::DoubleWord), // sll x5, x6, x7
-            (0x007352b3, AluOp::Srl, AluWidth::DoubleWord), // srl x5, x6, x7
-            (0x407352b3, AluOp::Sra, AluWidth::DoubleWord), // sra x5, x6, x7
-            (0x007322b3, AluOp::Slt, AluWidth::DoubleWord), // slt x5, x6, x7
-            (0x007332b3, AluOp::Sltu, AluWidth::DoubleWord), // sltu x5, x6, x7
-            (0x007302bb, AluOp::Add, AluWidth::Word),       // addw x5, x6, x7
-            (0x407302bb, AluOp::Sub, AluWidth::Word),       // subw x5, x6, x7
-            (0x007312bb, AluOp::Sll, AluWidth::Word),       // sllw x5, x6, x7
-            (0x007352bb, AluOp::Srl, AluWidth::Word),       // srlw x5, x6, x7
-            (0x407352bb, AluOp::Sra, AluWidth::Word),       // sraw x5, x6, x7
+            (0x007302b3, AluOp::Add, AluWidth::DoubleWord),
+            (0x407302b3, AluOp::Sub, AluWidth::DoubleWord),
+            (0x007342b3, AluOp::Xor, AluWidth::DoubleWord),
+            (0x007362b3, AluOp::Or, AluWidth::DoubleWord),
+            (0x007372b3, AluOp::And, AluWidth::DoubleWord),
+            (0x007312b3, AluOp::Sll, AluWidth::DoubleWord),
+            (0x007352b3, AluOp::Srl, AluWidth::DoubleWord),
+            (0x407352b3, AluOp::Sra, AluWidth::DoubleWord),
+            (0x007322b3, AluOp::Slt, AluWidth::DoubleWord),
+            (0x007332b3, AluOp::Sltu, AluWidth::DoubleWord),
+            (0x007302bb, AluOp::Add, AluWidth::Word),
+            (0x407302bb, AluOp::Sub, AluWidth::Word),
+            (0x007312bb, AluOp::Sll, AluWidth::Word),
+            (0x007352bb, AluOp::Srl, AluWidth::Word),
+            (0x407352bb, AluOp::Sra, AluWidth::Word),
         ];
 
         for (raw, alu_op, alu_width) in cases {
@@ -655,6 +684,38 @@ mod test {
     }
 
     #[test]
+    fn decode_m_extension() {
+        let cases = [
+            (0x023100b3, AluOp::Mul, AluWidth::DoubleWord),
+            (0x023110b3, AluOp::MulHigh, AluWidth::DoubleWord),
+            (0x023120b3, AluOp::MulHighSignedU, AluWidth::DoubleWord),
+            (0x023130b3, AluOp::MulHighU, AluWidth::DoubleWord),
+            (0x023140b3, AluOp::Div, AluWidth::DoubleWord),
+            (0x023150b3, AluOp::DivU, AluWidth::DoubleWord),
+            (0x023160b3, AluOp::Rem, AluWidth::DoubleWord),
+            (0x023170b3, AluOp::RemU, AluWidth::DoubleWord),
+            (0x023100bb, AluOp::Mul, AluWidth::Word),
+            (0x023140bb, AluOp::Div, AluWidth::Word),
+            (0x023150bb, AluOp::DivU, AluWidth::Word),
+            (0x023160bb, AluOp::Rem, AluWidth::Word),
+            (0x023170bb, AluOp::RemU, AluWidth::Word),
+        ];
+
+        for (raw, alu_op, alu_width) in cases {
+            assert_eq!(
+                Instruction::r_type(raw, alu_op, alu_width),
+                Instruction::AluRType {
+                    rd: 1,
+                    rs1: 2,
+                    rs2: 3,
+                    alu_op,
+                    alu_width,
+                }
+            )
+        }
+    }
+
+    #[test]
     fn instruction_memory_load_and_fetch() {
         // Rejects byte slices whose length is not a multiple of 4
         assert!(matches!(
@@ -663,7 +724,7 @@ mod test {
         ));
 
         let words = [0x0000000f_u32, 0x00000073, 0x00100073];
-        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let bytes: Box<[u8]> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
         let imem = InstructionMemory::from_bytes(&bytes, 0).unwrap();
 
         assert_eq!(imem.fetch(0), Ok(Instruction::Fence));

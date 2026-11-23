@@ -63,7 +63,7 @@ pub enum CpuCreationError {
     RamMisalign,
     InstructionLoad,
     InvalidElf,
-    OutOfRam,
+    OutOfRam { current: u64, required: u64 },
 }
 
 impl std::fmt::Display for CpuCreationError {
@@ -72,7 +72,11 @@ impl std::fmt::Display for CpuCreationError {
             Self::RamMisalign => write!(f, "ram size is not a multiple of 16"),
             Self::InstructionLoad => write!(f, "invalid instruction in binary"),
             Self::InvalidElf => write!(f, "invalid ELF file"),
-            Self::OutOfRam => write!(f, "not enough ram"),
+            Self::OutOfRam { current, required } => write!(
+                f,
+                "not enough ram, need {} bytes, have {}",
+                required, current
+            ),
         }
     }
 }
@@ -93,6 +97,85 @@ fn alu(lhs: u64, rhs: u64, mode: AluOp, width: AluWidth) -> u64 {
         (Op::Add, AluWidth::Word) => lhs.wrapping_add(rhs) as i32 as i64 as u64,
         (Op::Sub, AluWidth::DoubleWord) => lhs.wrapping_sub(rhs),
         (Op::Sub, AluWidth::Word) => lhs.wrapping_sub(rhs) as i32 as i64 as u64,
+        (Op::Mul, AluWidth::DoubleWord) => lhs.wrapping_mul(rhs),
+        (Op::MulHigh, _) => {
+            ((lhs.cast_signed() as i128).wrapping_mul(rhs.cast_signed() as i128) >> 64) as u64
+        }
+        (Op::MulHighSignedU, _) => {
+            ((lhs.cast_signed() as i128).wrapping_mul(rhs as u128 as i128) >> 64) as u64
+        }
+        (Op::MulHighU, _) => ((lhs as u128).wrapping_mul(rhs as u128) >> 64) as u64,
+        (Op::Div, AluWidth::DoubleWord) => {
+            if rhs == 0 {
+                u64::MAX
+            } else {
+                lhs.cast_signed()
+                    .wrapping_div(rhs.cast_signed())
+                    .cast_unsigned()
+            }
+        }
+        (Op::DivU, AluWidth::DoubleWord) => {
+            if rhs == 0 {
+                u64::MAX
+            } else {
+                lhs / rhs
+            }
+        }
+        (Op::Rem, AluWidth::DoubleWord) => {
+            if rhs == 0 {
+                lhs
+            } else {
+                lhs.cast_signed()
+                    .wrapping_rem(rhs.cast_signed())
+                    .cast_unsigned()
+            }
+        }
+        (Op::RemU, AluWidth::DoubleWord) => {
+            if rhs == 0 {
+                lhs
+            } else {
+                lhs % rhs
+            }
+        }
+        (Op::Mul, AluWidth::Word) => (lhs as u32).wrapping_mul(rhs as _) as i32 as i64 as u64,
+        (Op::Div, AluWidth::Word) => {
+            let rhs = rhs as i32;
+
+            if rhs == 0 {
+                u64::MAX
+            } else {
+                (lhs as i32).wrapping_div(rhs) as i64 as u64
+            }
+        }
+        (Op::DivU, AluWidth::Word) => {
+            let rhs = rhs as u32;
+
+            if rhs == 0 {
+                u64::MAX
+            } else {
+                (lhs as u32).wrapping_div(rhs) as i32 as i64 as u64
+            }
+        }
+        (Op::Rem, AluWidth::Word) => {
+            let lhs = lhs as i32;
+            let rhs = rhs as i32;
+
+            if rhs == 0 {
+                lhs as i64 as u64
+            } else {
+                lhs.wrapping_rem(rhs) as i64 as u64
+            }
+        }
+        (Op::RemU, AluWidth::Word) => {
+            let lhs = lhs as u32;
+            let rhs = rhs as u32;
+
+            if rhs == 0 {
+                lhs as i32 as i64 as u64
+            } else {
+                lhs.wrapping_rem(rhs) as i32 as i64 as u64
+            }
+        }
         (Op::Xor, _) => lhs ^ rhs,
         (Op::Or, _) => lhs | rhs,
         (Op::And, _) => lhs & rhs,
@@ -271,7 +354,10 @@ impl Cpu {
                 if memory_size > 0 {
                     let dest = data_memory
                         .bytes_mut(virutal_address, memory_size)
-                        .map_err(|_| CpuCreationError::OutOfRam)?;
+                        .map_err(|_| CpuCreationError::OutOfRam {
+                            current: ram_size,
+                            required: virutal_address + memory_size as u64,
+                        })?;
                     dest[..segment_size].copy_from_slice(segment_data);
                     dest[segment_size..].fill(0);
                 }
