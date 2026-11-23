@@ -263,8 +263,8 @@ impl Instruction {
             // lui
             (_, _, 0b0110111) => Instruction::lui(instr),
             (_, _, 0b0010111) => Instruction::auipc(instr),
-            // fence
-            (_, 0x0, 0b0001111) => Instruction::fence(),
+            // fence (with Zifencei extension)
+            (_, 0x0, 0b0001111) | (_, 0x1, 0b0001111) => Instruction::fence(),
             // ecall
             _ if instr == 0x00000073 => Instruction::ecall(),
             // ebreak
@@ -675,6 +675,7 @@ mod test {
         );
 
         assert_eq!(Instruction::new(0x0000000f), Instruction::Fence);
+        assert_eq!(Instruction::new(0x0000100f), Instruction::Fence);
         assert_eq!(Instruction::new(0x00000073), Instruction::ECall);
         assert_eq!(Instruction::new(0x00100073), Instruction::EBreak);
         assert_eq!(
